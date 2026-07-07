@@ -148,6 +148,23 @@ class PetWindow(QWidget):
             return p
         return None
 
+    # ---------- anchor points (used by bubble/chat for head/mouth alignment) ----------
+
+    # Sprite anatomy ratios for a 192x208 chibi cell (Suisei-style codex pets):
+    # head center around y=50/208 ≈ 0.24, mouth around y=80/208 ≈ 0.38.
+    HEAD_Y_RATIO = 0.24
+    MOUTH_Y_RATIO = 0.40
+
+    def head_point(self) -> QPoint:
+        """Global center point of the pet's head."""
+        size = self.cfg["size"]
+        return self.mapToGlobal(QPoint(size // 2, int(size * self.HEAD_Y_RATIO)))
+
+    def mouth_point(self) -> QPoint:
+        """Global center point of the pet's mouth."""
+        size = self.cfg["size"]
+        return self.mapToGlobal(QPoint(size // 2, int(size * self.MOUTH_Y_RATIO)))
+
     # ---------- pet loading ----------
 
     @staticmethod
@@ -308,7 +325,7 @@ class PetWindow(QWidget):
         # restored via the bubble.closed signal.
         auto_hide = bool(self.cfg.get("bubble_auto_hide", False))
         duration = int(self.cfg.get("bubble_duration_ms", 0)) if auto_hide else 0
-        self._bubble.show_next_to(self, message, duration)
+        self._bubble.blow_out_from(self, message, duration)
         if self._pet is not None and state_hint:
             if self._prev_state_before_reminder is None:
                 self._prev_state_before_reminder = self._pet.state_id
@@ -334,7 +351,13 @@ class PetWindow(QWidget):
     def _open_chat(self, seed_pet_message: str = "") -> None:
         if self._chat_window is None:
             self._chat_window = ChatWindow(self.cfg)
-        self._chat_window.open_next_to(self, seed_pet_message)
+        # If the bubble is still on-screen (or was just clicked), animate the
+        # chat window growing out of the bubble's last rect for continuity.
+        bubble = getattr(self, "_bubble", None)
+        if bubble is not None and bubble.geometry().isValid():
+            self._chat_window.open_from_rect(self, bubble.geometry(), seed_pet_message)
+        else:
+            self._chat_window.open_next_to(self, seed_pet_message)
 
     def _open_chat_settings(self) -> None:
         dlg = ChatSettingsDialog(self.cfg, parent=self)

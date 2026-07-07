@@ -1,4 +1,13 @@
-from PyQt5.QtCore import QObject, QSize, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPropertyAnimation,
+    QRect,
+    QSize,
+    Qt,
+    QThread,
+    pyqtSignal,
+)
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication,
@@ -97,6 +106,7 @@ class ChatWindow(QWidget):
         self._history: list[dict] = []
         self._worker: _ChatWorker | None = None
         self._pending_row: _MessageRow | None = None
+        self._open_anim: QPropertyAnimation | None = None
 
         self.setMinimumSize(WINDOW_MIN)
         self.resize(WINDOW_MIN)
@@ -175,34 +185,60 @@ class ChatWindow(QWidget):
     # ---------- lifecycle ----------
 
     def open_next_to(self, target: QWidget, seed_pet_message: str = "") -> None:
+        self._open(target, seed_pet_message, from_rect=None)
+
+    def open_from_rect(self, target: QWidget, from_rect: QRect, seed_pet_message: str = "") -> None:
+        """Open the chat animating from `from_rect` (usually the bubble's last
+        geometry) up to its normal head-aligned size."""
+        self._open(target, seed_pet_message, from_rect=from_rect)
+
+    def _open(self, target: QWidget, seed_pet_message: str, from_rect: QRect | None) -> None:
         self._target = target
-        self._reposition_for(target)
         if seed_pet_message and not self._history:
             self._append_row("pet", seed_pet_message)
             self._history.append({"role": "assistant", "content": seed_pet_message})
-        self.show()
-        self.raise_()
+        final_rect = self._final_rect_for(target)
+        if from_rect is not None:
+            self.setGeometry(from_rect)
+            self.show()
+            self.raise_()
+            anim = QPropertyAnimation(self, b"geometry", self)
+            anim.setDuration(320)
+            anim.setStartValue(from_rect)
+            anim.setEndValue(final_rect)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._open_anim = anim
+            anim.start()
+        else:
+            self.setGeometry(final_rect)
+            self.show()
+            self.raise_()
         self.activateWindow()
         self._input.setFocus()
 
     def follow_target(self) -> None:
         if self._target is not None and self.isVisible():
-            self._reposition_for(self._target)
+            self.setGeometry(self._final_rect_for(self._target))
 
-    def _reposition_for(self, target: QWidget) -> None:
+    def _final_rect_for(self, target: QWidget) -> QRect:
+        w = max(WINDOW_MIN.width(), self.width())
+        h = max(WINDOW_MIN.height(), self.height())
+        # Anchor the vertical center to the pet's head so the chat "attaches"
+        # near the face instead of floating in the middle of the sprite.
         geom = target.frameGeometry()
         screen = QApplication.primaryScreen().availableGeometry()
         right_x = geom.right() + 8
-        left_x = geom.left() - self.width() - 8
-        if right_x + self.width() <= screen.right():
+        left_x = geom.left() - w - 8
+        if right_x + w <= screen.right():
             x = right_x
         elif left_x >= screen.left():
             x = left_x
         else:
-            x = max(screen.left(), min(right_x, screen.right() - self.width()))
-        y = geom.center().y() - self.height() // 2
-        y = max(screen.top(), min(y, screen.bottom() - self.height()))
-        self.move(x, y)
+            x = max(screen.left(), min(right_x, screen.right() - w))
+        head_y = target.head_point().y() if hasattr(target, "head_point") else geom.center().y()
+        y = head_y - h // 2
+        y = max(screen.top(), min(y, screen.bottom() - h))
+        return QRect(x, y, w, h)
 
     # ---------- chat ----------
 
