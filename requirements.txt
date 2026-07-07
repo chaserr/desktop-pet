@@ -1,0 +1,3 @@
+PyQt5>=5.15.0
+pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
+holidays>=0.60
