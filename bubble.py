@@ -1,59 +1,60 @@
+"""Amber reminder speech bubble. Rounded rect body + tail pointing at the pet,
+text + × close button, small attention shake on show. No grow animation, no
+sparkles — just the final popup."""
 from typing import Callable
 
-from PyQt5.QtCore import (
-    QEasingCurve,
-    QPoint,
-    QPropertyAnimation,
-    QRect,
-    QRectF,
-    Qt,
-    QTimer,
-    pyqtSignal,
-)
+from PyQt5.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QApplication, QPushButton, QWidget
 
+# ---------- geometry / typography ----------
 PADDING = 14
 TAIL = 10
 CORNER_R = 12
 MAX_TEXT_WIDTH = 240
 CLOSE_BTN_SIZE = 22
-GROW_MS = 550          # blow-out animation duration
-START_BUBBLE_W = 44    # size of the "still coming out of the mouth" bubble
-START_BUBBLE_H = 32
-# Warmer, attention-grabbing palette — feels like a real reminder note.
+FINAL_FONT_PT = 13
+
+# ---------- palette ----------
 BG_COLOR = QColor(255, 249, 236, 245)
 BORDER_COLOR = QColor(210, 155, 60, 140)
 TEXT_COLOR = QColor(50, 40, 20)
+
+# ---------- attention shake ----------
 SHAKE_FRAMES = ((6, 0), (-6, 0), (5, 0), (-5, 0), (3, 0), (-3, 0), (0, 0))
 SHAKE_INTERVAL_MS = 55
 
 
 class SpeechBubble(QWidget):
-    """Frameless, translucent bubble that gets "blown out" from the pet's mouth.
-    Grows from a tiny circle near the mouth up to full size at the pet's head level.
-    Emits `closed` whenever the bubble is hidden — so callers can restore state."""
+    """Amber rounded-rect reminder bubble with a tail poking at the pet. Text
+    is left-aligned; a × close button sits in the top-right; when a reply
+    callback is set, clicking the body forwards the text to it."""
 
     closed = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(
             parent,
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus,
+            Qt.FramelessWindowHint
+            | Qt.WindowStaysOnTopHint
+            | Qt.WindowDoesNotAcceptFocus
+            | Qt.Tool,
         )
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.NoFocus)
+
         self._text = ""
-        self._tail_on_left = True
-        self._font = QFont("PingFang SC", 13)
-        self._target = None  # PetWindow — kept loose to avoid an import cycle
+        self._font = QFont("PingFang SC", FINAL_FONT_PT)
+        self._target = None
         self._reply_callback: Callable[[str], None] | None = None
+        self._tail_on_left = True
+        self._final_rect = QRect()
         self._base_pos = QPoint(0, 0)
-        self._final_size = (0, 0)
+        self._state = "idle"  # idle | shown
         self._shake_idx = 0
-        self._growing = False
-        self._grow_anim: QPropertyAnimation | None = None
+
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide)
@@ -64,75 +65,56 @@ class SpeechBubble(QWidget):
         self._close_btn = QPushButton("×", self)
         self._close_btn.setFixedSize(CLOSE_BTN_SIZE, CLOSE_BTN_SIZE)
         self._close_btn.setCursor(Qt.PointingHandCursor)
+        self._close_btn.setFocusPolicy(Qt.NoFocus)
         self._close_btn.setStyleSheet(
             "QPushButton { border: none; background: transparent;"
             " color: rgba(90, 60, 30, 200); font-size: 16px; font-weight: bold; }"
             "QPushButton:hover { color: #c0392b; }"
         )
         self._close_btn.clicked.connect(self.hide)
-        self._close_btn.hide()  # only reveal after growth completes
+        self._close_btn.hide()
 
     # ---------- public API ----------
 
     def blow_out_from(self, pet, text: str, duration_ms: int = 0) -> None:
-        """Animate the bubble growing out of `pet`'s mouth and landing at head level.
-        `pet` must expose `head_point()` and `mouth_point()` returning global QPoints."""
+        """Show the amber bubble beside `pet` with `text`. Optional auto-hide
+        after `duration_ms` (0 = keep until the user clicks ×)."""
         self._text = text
         self._target = pet
-        final_rect, tail_left = self._compute_final_rect(pet)
+
+        rect, tail_left = self._compute_final_rect(pet)
         self._tail_on_left = tail_left
-        self._final_size = (final_rect.width(), final_rect.height())
-        self._base_pos = QPoint(final_rect.x(), final_rect.y())
-
-        # Start rect: tiny bubble centered at the mouth.
-        mouth = pet.mouth_point()
-        start_rect = QRect(
-            mouth.x() - START_BUBBLE_W // 2,
-            mouth.y() - START_BUBBLE_H // 2,
-            START_BUBBLE_W,
-            START_BUBBLE_H,
-        )
-
-        self.setGeometry(start_rect)
+        self._final_rect = rect
+        self._base_pos = QPoint(rect.x(), rect.y())
+        self.setGeometry(rect)
+        self._state = "shown"
         self._position_close_button()
-        self._close_btn.hide()
+        self._close_btn.show()
         self.show()
         self.raise_()
-
-        if self._grow_anim is not None:
-            self._grow_anim.stop()
-        anim = QPropertyAnimation(self, b"geometry", self)
-        anim.setDuration(GROW_MS)
-        anim.setStartValue(start_rect)
-        anim.setEndValue(final_rect)
-        anim.setEasingCurve(QEasingCurve.OutBack)
-        self._grow_anim = anim
-        self._growing = True
-        anim.start()
-        # QPropertyAnimation.finished can be flaky under some QPA plugins;
-        # a QTimer is a reliable belt-and-braces trigger.
-        QTimer.singleShot(GROW_MS + 40, self._on_grow_finished)
+        self._start_shake()
 
         self._hide_timer.stop()
         if duration_ms > 0:
-            self._hide_timer.start(duration_ms + GROW_MS)
+            self._hide_timer.start(duration_ms)
 
     def reposition(self) -> None:
-        """Called when the pet moves. Snap to the new head position instantly."""
-        if self._target is None or not self.isVisible() or self._growing:
+        """Re-anchor next to the pet after the pet has moved."""
+        if self._target is None or not self.isVisible() or self._state != "shown":
             return
-        final_rect, tail_left = self._compute_final_rect(self._target)
+        rect, tail_left = self._compute_final_rect(self._target)
         if tail_left != self._tail_on_left:
             self._tail_on_left = tail_left
             self.update()
-        self._base_pos = QPoint(final_rect.x(), final_rect.y())
-        self.setGeometry(final_rect)
+        self._final_rect = rect
+        self._base_pos = QPoint(rect.x(), rect.y())
+        self.setGeometry(rect)
         self._position_close_button()
 
     def set_reply_callback(self, cb: Callable[[str], None] | None) -> None:
         self._reply_callback = cb
 
-    # ---------- layout helpers ----------
+    # ---------- geometry ----------
 
     def _compute_final_rect(self, pet) -> tuple[QRect, bool]:
         fm = QFontMetrics(self._font)
@@ -148,8 +130,11 @@ class SpeechBubble(QWidget):
 
         screen = QApplication.primaryScreen().availableGeometry()
         pet_geom = pet.frameGeometry()
-        right_x = pet_geom.right() + 6
-        left_x = pet_geom.left() - total_w - 6
+        # Small negative gap so the tail visually pokes into the pet — reads
+        # as "苏酱在说话" rather than a floating detached bubble.
+        overlap = 8
+        right_x = pet_geom.right() - overlap
+        left_x = pet_geom.left() - total_w + overlap
         if right_x + total_w <= screen.right():
             x = right_x
             tail_left = True
@@ -169,19 +154,7 @@ class SpeechBubble(QWidget):
         body_right = self.width() - (TAIL if not self._tail_on_left else 0)
         self._close_btn.move(body_right - CLOSE_BTN_SIZE - 4, 4)
 
-    # ---------- animation callbacks ----------
-
-    def _on_grow_finished(self) -> None:
-        if not self._growing:
-            return  # idempotent — animation already reset us
-        self._growing = False
-        w, h = self._final_size
-        if w and h:
-            self.setGeometry(self._base_pos.x(), self._base_pos.y(), w, h)
-        self._position_close_button()
-        self._close_btn.show()
-        self.update()  # transition from blob-only paint to text+tail paint
-        self._start_shake()
+    # ---------- attention shake ----------
 
     def _start_shake(self) -> None:
         self._shake_idx = 0
@@ -198,38 +171,41 @@ class SpeechBubble(QWidget):
 
     # ---------- Qt events ----------
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        try:
+            from macos_bridge import float_over_everything
+        except ImportError:
+            return
+        float_over_everything(self, transient=True)
+
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
         self._hide_timer.stop()
         self._shake_timer.stop()
-        if self._grow_anim is not None:
-            self._grow_anim.stop()
-        self._growing = False
+        self._state = "idle"
         self.closed.emit()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._position_close_button()
+        if self._state == "shown":
+            self._position_close_button()
 
     def paintEvent(self, _event) -> None:
+        if self._state != "shown":
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        if self._tail_on_left:
-            body = QRectF(TAIL, 0, self.width() - TAIL, self.height())
-        else:
-            body = QRectF(0, 0, self.width() - TAIL, self.height())
-        # During growth: only draw a smooth rounded blob, no tail, no text.
-        if self._growing:
-            path = QPainterPath()
-            path.addRoundedRect(QRectF(0, 0, self.width(), self.height()), CORNER_R, CORNER_R)
-            p.setBrush(BG_COLOR)
-            p.setPen(QPen(BORDER_COLOR, 1))
-            p.drawPath(path)
-            return
+        w = self.width()
+        h = self.height()
 
+        if self._tail_on_left:
+            body = QRectF(TAIL, 0, w - TAIL, h)
+        else:
+            body = QRectF(0, 0, w - TAIL, h)
         path = QPainterPath()
         path.addRoundedRect(body, CORNER_R, CORNER_R)
-        tail_y = self.height() / 2
+        tail_y = h / 2
         tail = QPainterPath()
         if self._tail_on_left:
             tail.moveTo(body.left(), tail_y - TAIL)
@@ -237,11 +213,10 @@ class SpeechBubble(QWidget):
             tail.lineTo(body.left(), tail_y + TAIL)
         else:
             tail.moveTo(body.right(), tail_y - TAIL)
-            tail.lineTo(self.width(), tail_y)
+            tail.lineTo(w, tail_y)
             tail.lineTo(body.right(), tail_y + TAIL)
         tail.closeSubpath()
         path.addPath(tail)
-
         p.setBrush(BG_COLOR)
         p.setPen(QPen(BORDER_COLOR, 1))
         p.drawPath(path)
@@ -266,7 +241,7 @@ class SpeechBubble(QWidget):
             )
 
     def mousePressEvent(self, event) -> None:
-        if self._growing:
+        if self._state != "shown":
             return
         if event.button() == Qt.LeftButton and self._reply_callback is not None:
             text = self._text

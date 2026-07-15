@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from config import CONFIG_DIR, ensure_dirs
 from holidays_check import is_lunch_hour, now_is_work_time
+from suspend import is_suspended, suspended_until
 
 PENDING_FILE = CONFIG_DIR / "pending_reminder.txt"
 VENV_PY = SCRIPT_DIR / ".venv" / "bin" / "python"
@@ -51,6 +52,9 @@ def launch_pet_detached() -> None:
 
 def main() -> int:
     now = datetime.now()
+    if is_suspended(now.date()):
+        # User asked to snooze — skip entirely. resume.command clears it.
+        return 0
     if not now_is_work_time(now):
         return 0
     if is_lunch_hour(now):

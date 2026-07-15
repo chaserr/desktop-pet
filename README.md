@@ -14,7 +14,9 @@ macOS 桌面动漫宠物 · 星街彗星陪你写代码 · 定时提醒喝水站
 - 🖱️ **拖动 + 跟随鼠标** — 左键拖走,右键呼出菜单,跟随鼠标时按方向自动切 `running-right` / `running-left` / `idle`
 - 🪟 **穿透全屏 App + 所有 Space** — `NSFloatingWindowLevel` + `canJoinAllSpaces | fullScreenAuxiliary` + `hidesOnDeactivate = NO`,点终端也不消失
 - 🚫 **无 Dock 图标** — `NSApplicationActivationPolicyAccessory`,后台常驻不占任务栏
-- 💧 **强提醒气泡** — 起立 / 喝水 定时提醒,首弹时有 shake 抖动动画,永不自动消失,点 `×` 才关闭,关闭后宠物自动恢复原动作
+- 💧 **强提醒气泡** — 起立 / 喝水 定时提醒,气泡"从苏酱嘴里吹气球"式生长 (充气 → 抖动 → 变形成对话框),文字在气球中同步放大;永不自动消失,点 `×` 才关闭,关闭后宠物自动恢复原动作
+- ⭐ **鼓励语** — 每 10-15 分钟随机在苏酱头顶浮一句鼓励,淡入淡出 (不打扰,不需要点)
+- 🌙 **Snooze 暂停** — 一键"今天/3天/7天/自定义 天内不再弹出",退出并静音;设定 ≥2 天会二次确认并给出恢复命令;第 N+1 天自动恢复;也可以随时双击 `resume.command` 立即恢复
 - 💬 **LLM 聊天** — 点气泡 → 缩小成对话框,支持 Claude / Codex / DeepSeek,自动检测本机 `claude` / `codex` CLI 是否已登录,零配置直接用
 - 📅 **工作时段自动上班** — launchd 在周一到周五 (法定节假日除外) 10/11/14/15/16/17/18 点触发,午休 12/13 点跳过。宠物没启动就自动拉起。用户手动 Quit 后,下一次到点又拉起
 - ⚙️ **配置可视化** — 提醒文案 / 间隔 / API key / 系统提示词 全部有 GUI 编辑,不用改代码
@@ -45,7 +47,7 @@ python3 -m venv .venv
 .venv/bin/python pet.py
 ```
 
-首次启动会自动 `~/HMProject/desktop-pet/data/config.json` 里读 / 写配置,数据全在项目下的 `data/`。
+首次启动会自动在项目目录下 `data/config.json` 读/写配置,资源和运行时状态全在项目内的 `data/`。
 
 ---
 
@@ -184,7 +186,7 @@ desktop-pet/
 A: 已经修好了。用了 `NSWindow.hidesOnDeactivate = NO` + 移除 `Qt.Tool` flag。如果还遇到,右键 → Always on top 是打勾状态吗?
 
 **Q: 启动没窗口?**
-A: 检查 `~/HMProject/desktop-pet/data/config.json` 的 `pet_path` 是否指向存在的文件/目录。删掉这个字段或整个 config.json,重启会自动选默认宠物。
+A: 检查项目内 `data/config.json` 的 `pet_path` 是否指向存在的文件/目录。删掉这个字段或整个 config.json,重启会自动选默认宠物。
 
 **Q: 想彻底不用 Dock 图标?**
 A: 已经是了。`macos_bridge.hide_dock_icon()` 在启动第一时间调,activationPolicy 直接切成 `.accessory`,连 Cmd+Tab 都不出现。
@@ -200,10 +202,37 @@ A: 右键 → Load Codex Pet (slug)…,输入 codex-pets.net 上的 slug,比如 
 
 ---
 
+## Snooze 暂停
+
+苏酱身上右键 → **Snooze (退出并静音)** 有 4 个选项:
+
+| 选项 | 行为 |
+|---|---|
+| 今天不再弹出 | 直接静默今天,明天自动恢复,无需二次确认 |
+| 3 / 7 天不再弹出 | 弹出确认框,内含 `resume.command` 路径,确认后立即静默并退出 |
+| 自定义天数… | 输入 1-90 天,同样带确认 |
+
+**恢复方式**:
+1. **随时立即恢复** — Finder 双击项目根目录里的 `resume.command`,或终端跑 `./resume.command`
+2. **等第 N+1 天** — 自动恢复
+3. **删文件** — `rm data/suspended_until.txt` (在项目根目录里)
+4. **打开宠物** — 如果处在暂停期间宠物已经启动,右键 Snooze 菜单里会显示"当前暂停至 YYYY-MM-DD (点击立即恢复)"
+
+(暂停确认框弹出时会显示当前安装位置的 `resume.command` 完整路径,直接复制粘贴到终端也能跑。)
+
+暂停期间:
+- launchd 定时任务照跑但立刻早退,不弹提醒
+- 手动启动宠物可以,但不会自动弹提醒 / 不会弹鼓励语
+- 手动右键 → Reminders → Show now: xxx 还是能触发 (你主动的操作不受静默约束)
+
+---
+
 ## 路线图
 
-- [ ] 从嘴里"吹泡泡"的入场动画 (气泡从宠物嘴边由小变大)
-- [ ] 头对齐的定位 (不是画面中心)
+- [x] 从嘴里"吹气球"的入场动画 (充气 → 抖动 → 变形成对话框)
+- [x] 头对齐的定位 (不是画面中心)
+- [x] 鼓励语头顶飘字
+- [x] Snooze / 一键恢复
 - [ ] Windows 版本 (Task Scheduler + tasklist)
 - [ ] 更多默认宠物
 

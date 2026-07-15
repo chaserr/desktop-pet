@@ -4,5 +4,7 @@ __pycache__/
 .DS_Store
 data/config.json
 data/pending_reminder.txt
+data/suspended_until.txt
+data/time_reminders_state.json
 launchd/*.plist
 !launchd/*.plist.template

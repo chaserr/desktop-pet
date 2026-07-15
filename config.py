@@ -1,9 +1,33 @@
 import json
 from pathlib import Path
 
-CONFIG_DIR = Path(__file__).resolve().parent / "data"
+PROJECT_ROOT = Path(__file__).resolve().parent
+CONFIG_DIR = PROJECT_ROOT / "data"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 ASSETS_DIR = CONFIG_DIR / "assets"
+
+# Fields containing filesystem paths — stored relative to PROJECT_ROOT when
+# possible so config.json stays portable and doesn't leak the user's home dir.
+PATH_FIELDS = ("gif_path", "pet_path")
+
+
+def _to_portable(path: str) -> str:
+    if not path:
+        return path
+    try:
+        p = Path(path).resolve()
+        return str(p.relative_to(PROJECT_ROOT))
+    except (ValueError, OSError):
+        return path
+
+
+def _from_portable(path: str) -> str:
+    if not path:
+        return path
+    p = Path(path)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    return str(p)
 
 DEFAULTS = {
     "gif_path": "",
@@ -16,6 +40,8 @@ DEFAULTS = {
     "always_on_top": True,
     "playback_speed": 50,  # percent; 100 = original GIF timing
     "reminders_enabled": True,
+    "encouragement_enabled": True,
+    "encouragement_interval_seconds": 750,  # ~12.5 min average, ±20% jitter
     "bubble_auto_hide": False,   # bubble stays until user closes it
     "bubble_duration_ms": 7000,  # only honored when bubble_auto_hide is True
     "reminders": [],  # filled at load-time via _default_reminders()
@@ -74,12 +100,16 @@ def load() -> dict:
     merged["llm_settings"] = llm_defaults
     if not merged.get("chat_system_prompt"):
         merged["chat_system_prompt"] = _default_system_prompt()
+    for field in PATH_FIELDS:
+        merged[field] = _from_portable(merged.get(field, ""))
     return merged
 
 
 def save(cfg: dict) -> None:
     ensure_dirs()
     payload = {k: cfg.get(k, DEFAULTS[k]) for k in DEFAULTS}
+    for field in PATH_FIELDS:
+        payload[field] = _to_portable(payload.get(field, ""))
     CONFIG_FILE.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False),
         encoding="utf-8",

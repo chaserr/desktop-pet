@@ -22,9 +22,12 @@ def hide_dock_icon() -> bool:
     return True
 
 
-def float_over_everything(widget) -> bool:
+def float_over_everything(widget, transient: bool = False) -> bool:
     """Boost the widget's NSWindow so it shows on every Space and over full-screen apps.
-    Must be called after the widget is shown so winId() returns a valid NSView*."""
+    Must be called after the widget is shown so winId() returns a valid NSView*.
+    Set `transient=True` for reminder / encouragement popups so the window is
+    treated as a transient overlay that never becomes key — the user's typing
+    focus in whichever app is frontmost stays put."""
     if not is_macos():
         return False
     try:
@@ -34,6 +37,7 @@ def float_over_everything(widget) -> bool:
             NSWindowCollectionBehaviorCanJoinAllSpaces,
             NSWindowCollectionBehaviorFullScreenAuxiliary,
             NSWindowCollectionBehaviorStationary,
+            NSWindowCollectionBehaviorTransient,
         )
     except ImportError:
         return False
@@ -48,12 +52,22 @@ def float_over_everything(widget) -> bool:
     if ns_window is None:
         return False
     ns_window.setLevel_(NSFloatingWindowLevel)
-    ns_window.setCollectionBehavior_(
+    behavior = (
         NSWindowCollectionBehaviorCanJoinAllSpaces
         | NSWindowCollectionBehaviorStationary
         | NSWindowCollectionBehaviorFullScreenAuxiliary
     )
+    if transient:
+        behavior |= NSWindowCollectionBehaviorTransient
+    ns_window.setCollectionBehavior_(behavior)
     # Tool/accessory windows on macOS auto-hide when the owning app loses focus.
     # Force the NSWindow to stay visible regardless of activation state.
     ns_window.setHidesOnDeactivate_(False)
+    # Belt-and-braces: refuse to become the key/main window so the app the
+    # user is currently typing in keeps its focus.
+    if transient:
+        try:
+            ns_window.setBecomesKeyOnlyIfNeeded_(True)
+        except AttributeError:
+            pass  # Only on NSPanel; NSWindow silently ignores.
     return True

@@ -19,12 +19,14 @@ import codex_fetcher
 import config
 import gif_manager
 import gif_pet
+import encouragements
 import reminders as reminders_mod
 from bubble import SpeechBubble
 from chat_settings_dialog import ChatSettingsDialog
 from chat_window import ChatWindow
 from gif_pet import GifPet
-from reminders import ReminderScheduler
+from mini_bubble import MiniBubble
+from reminders import ReminderScheduler, TimeReminderScheduler
 from reminders_dialog import RemindersDialog
 from sprite_atlas import STATES, SpriteAnimator
 
@@ -103,10 +105,69 @@ class PetWindow(QWidget):
         )
         self._scheduler = ReminderScheduler(reminders=reminders, parent=self)
         self._scheduler.remind.connect(self._on_reminder)
+
+        time_reminders = reminders_mod.time_reminders_from_dicts(
+            reminders_mod.default_time_reminders_dicts()
+        )
+        self._time_scheduler = TimeReminderScheduler(time_reminders, parent=self)
+        self._time_scheduler.remind.connect(self._on_reminder)
+
         self._prev_state_before_reminder: str | None = None
-        if self.cfg.get("reminders_enabled", True):
+        import suspend as _suspend
+        if self.cfg.get("reminders_enabled", True) and not _suspend.is_suspended():
             self._scheduler.start()
+            self._time_scheduler.start()
         self._build_pending_reminder_watcher()
+        self._build_encouragement()
+
+    def _build_encouragement(self) -> None:
+        self._mini_bubble = MiniBubble()
+        self._schedule_next_encouragement()
+
+    def _schedule_next_encouragement(self) -> None:
+        # When disabled, keep polling at 60s so the user can toggle it back on
+        # without needing to restart the app.
+        if not self.cfg.get("encouragement_enabled", True):
+            QTimer.singleShot(60_000, self._pop_encouragement)
+            return
+        base_s = int(self.cfg.get("encouragement_interval_seconds", 750))
+        QTimer.singleShot(
+            encouragements.next_interval_ms(base_s),
+            self._pop_encouragement,
+        )
+
+    def _pop_encouragement(self) -> None:
+        import suspend as _suspend
+        # Suspended or disabled → still reschedule but skip the actual pop.
+        if self.cfg.get("encouragement_enabled", True) and not _suspend.is_suspended():
+            self._mini_bubble.pop(self, encouragements.random_phrase())
+        self._schedule_next_encouragement()
+
+    def _toggle_encouragement(self, checked: bool) -> None:
+        self.cfg["encouragement_enabled"] = bool(checked)
+        config.save(self.cfg)
+
+    def _set_encouragement_interval(self, seconds: int) -> None:
+        self.cfg["encouragement_interval_seconds"] = max(30, int(seconds))
+        config.save(self.cfg)
+
+    def _encouragement_interval_custom(self) -> None:
+        current_min = int(self.cfg.get("encouragement_interval_seconds", 750)) / 60
+        val, ok = QInputDialog.getDouble(
+            self,
+            "Encouragement interval",
+            "每隔多少分钟弹一次鼓励?",
+            current_min,
+            0.5,
+            240.0,
+            1,
+        )
+        if not ok:
+            return
+        self._set_encouragement_interval(int(val * 60))
+
+    def _show_encouragement_now(self) -> None:
+        self._mini_bubble.pop(self, encouragements.random_phrase())
 
     def _build_pending_reminder_watcher(self) -> None:
         self._pending_reminder_path = str(config.CONFIG_DIR / "pending_reminder.txt")
@@ -159,6 +220,16 @@ class PetWindow(QWidget):
         """Global center point of the pet's head."""
         size = self.cfg["size"]
         return self.mapToGlobal(QPoint(size // 2, int(size * self.HEAD_Y_RATIO)))
+
+    def head_top_point(self) -> QPoint:
+        """Global point at the TOP of the pet's head (above head centre).
+        Used to anchor things that should sit above the head, e.g. the
+        encouragement cloud trail."""
+        size = self.cfg["size"]
+        # Head radius estimate: sprite reference has head diameter ~28% of size,
+        # so top-of-head sits ~0.14 above the head centre.
+        top_y = max(0, int(size * (self.HEAD_Y_RATIO - 0.14)))
+        return self.mapToGlobal(QPoint(size // 2, top_y))
 
     def mouth_point(self) -> QPoint:
         """Global center point of the pet's mouth."""
@@ -340,13 +411,19 @@ class PetWindow(QWidget):
         self.cfg["reminders_enabled"] = bool(checked)
         if checked:
             self._scheduler.start()
+            self._time_scheduler.start()
         else:
             self._scheduler.stop()
+            self._time_scheduler.stop()
             self._bubble.hide()
         config.save(self.cfg)
 
     def _fire_reminder_now(self, rid: str) -> None:
-        self._scheduler.fire_now(rid)
+        # Interval reminders first, then time-of-day reminders (id namespaces are disjoint).
+        if any(r.id == rid for r in self._scheduler.reminders):
+            self._scheduler.fire_now(rid)
+        else:
+            self._time_scheduler.fire_now(rid)
 
     def _open_chat(self, seed_pet_message: str = "") -> None:
         if self._chat_window is None:
@@ -381,8 +458,10 @@ class PetWindow(QWidget):
         self._scheduler.reload(reminders_mod.from_dicts(self.cfg["reminders"]))
         if self.cfg["reminders_enabled"] and not self._scheduler.is_running():
             self._scheduler.start()
+            self._time_scheduler.start()
         elif not self.cfg["reminders_enabled"]:
             self._scheduler.stop()
+            self._time_scheduler.stop()
             self._bubble.hide()
         config.save(self.cfg)
 
@@ -481,6 +560,49 @@ class PetWindow(QWidget):
         for r in self._scheduler.reminders:
             act = reminders_menu.addAction(f"Show now: {r.label}")
             act.triggered.connect(lambda _=False, rid=r.id: self._fire_reminder_now(rid))
+        if self._time_scheduler.reminders:
+            reminders_menu.addSeparator()
+            for r in self._time_scheduler.reminders:
+                label = f"Show now: {r.label} ({r.hour:02d}:{r.minute:02d})"
+                act = reminders_menu.addAction(label)
+                act.triggered.connect(lambda _=False, rid=r.id: self._fire_reminder_now(rid))
+
+        enc_menu = menu.addMenu("Encouragement")
+        enc_enabled = enc_menu.addAction("Enabled")
+        enc_enabled.setCheckable(True)
+        enc_enabled.setChecked(bool(self.cfg.get("encouragement_enabled", True)))
+        enc_enabled.triggered.connect(self._toggle_encouragement)
+        enc_menu.addAction("Show now").triggered.connect(self._show_encouragement_now)
+        enc_menu.addSeparator()
+        interval_menu = enc_menu.addMenu("Interval")
+        igrp = QActionGroup(interval_menu)
+        igrp.setExclusive(True)
+        current_sec = int(self.cfg.get("encouragement_interval_seconds", 750))
+        presets = (
+            ("5 分钟", 300),
+            ("10 分钟", 600),
+            ("15 分钟", 900),
+            ("30 分钟", 1800),
+            ("1 小时", 3600),
+            ("2 小时", 7200),
+        )
+        matched_preset = False
+        for label, sec in presets:
+            a = QAction(label, interval_menu, checkable=True)
+            a.setChecked(current_sec == sec)
+            if current_sec == sec:
+                matched_preset = True
+            a.triggered.connect(lambda _=False, v=sec: self._set_encouragement_interval(v))
+            igrp.addAction(a)
+            interval_menu.addAction(a)
+        custom_label = "Custom…"
+        if not matched_preset:
+            custom_label = f"Custom… (当前 {current_sec / 60:g} 分钟)"
+        custom_action = QAction(custom_label, interval_menu, checkable=True)
+        custom_action.setChecked(not matched_preset)
+        custom_action.triggered.connect(self._encouragement_interval_custom)
+        igrp.addAction(custom_action)
+        interval_menu.addAction(custom_action)
 
         chat_menu = menu.addMenu("Chat")
         chat_menu.addAction("Open chat…").triggered.connect(lambda: self._open_chat(""))
@@ -490,6 +612,25 @@ class PetWindow(QWidget):
         top_action.setCheckable(True)
         top_action.setChecked(self.cfg.get("always_on_top", True))
         top_action.triggered.connect(self._toggle_on_top)
+
+        snooze_menu = menu.addMenu("Snooze (退出并静音)")
+        snooze_menu.addAction("今天不再弹出").triggered.connect(
+            lambda: self._snooze_and_quit(1)
+        )
+        snooze_menu.addAction("3 天不再弹出").triggered.connect(
+            lambda: self._snooze_and_quit(3)
+        )
+        snooze_menu.addAction("7 天不再弹出").triggered.connect(
+            lambda: self._snooze_and_quit(7)
+        )
+        snooze_menu.addAction("自定义天数…").triggered.connect(self._snooze_custom)
+        import suspend
+        if suspend.is_suspended():
+            u = suspend.suspended_until()
+            snooze_menu.addSeparator()
+            snooze_menu.addAction(f"当前暂停至 {u}  (点击立即恢复)").triggered.connect(
+                self._resume_now
+            )
 
         menu.addSeparator()
         menu.addAction("Quit").triggered.connect(QApplication.instance().quit)
@@ -547,6 +688,68 @@ class PetWindow(QWidget):
             if self._pet is not None:
                 self._pet.set_state("idle")
         config.save(self.cfg)
+
+    # ---------- snooze / resume ----------
+
+    def _snooze_and_quit(self, days: int) -> None:
+        import suspend
+        if days > 1 and not self._confirm_long_snooze(days):
+            return
+        target = suspend.suspend_for_days(days)
+        if days == 1:
+            msg = f"苏酱去休息了,{target.isoformat()} 之后回来 (=今天)。"
+        else:
+            resume_path = str(Path(__file__).resolve().parent / "resume.command")
+            msg = (
+                f"苏酱去休息了,{target.isoformat()} 之后回来。\n"
+                f"想提前恢复?双击运行:\n{resume_path}"
+            )
+        QMessageBox.information(self, "已暂停", msg)
+        QApplication.instance().quit()
+
+    def _snooze_custom(self) -> None:
+        days, ok = QInputDialog.getInt(
+            self,
+            "自定义 Snooze 天数",
+            "暂停多少天?(包含今天)",
+            value=3,
+            min=1,
+            max=90,
+            step=1,
+        )
+        if not ok:
+            return
+        self._snooze_and_quit(days)
+
+    def _confirm_long_snooze(self, days: int) -> bool:
+        resume_path = str(Path(__file__).resolve().parent / "resume.command")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("确认暂停")
+        box.setText(f"确认暂停 {days} 天?")
+        box.setInformativeText(
+            "期间苏酱不会自动弹出提醒 (定时任务也会跳过),\n"
+            "第 " + str(days + 1) + " 天自动恢复。\n\n"
+            "想提前恢复,双击运行:\n" + resume_path + "\n\n"
+            "或删除文件:\n" + str(Path(__file__).resolve().parent /
+                              "data" / "suspended_until.txt")
+        )
+        confirm = box.addButton("确认暂停", QMessageBox.AcceptRole)
+        cancel = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(cancel)
+        box.exec_()
+        return box.clickedButton() == confirm
+
+    def _resume_now(self) -> None:
+        import suspend
+        suspend.resume()
+        QMessageBox.information(self, "已恢复", "苏酱回来啦,定时提醒继续工作。")
+        # Re-enable schedulers if the user chose to keep pet running.
+        if self.cfg.get("reminders_enabled", True):
+            if not self._scheduler.is_running():
+                self._scheduler.start()
+            if not self._time_scheduler.is_running():
+                self._time_scheduler.start()
 
     def _toggle_on_top(self, checked: bool) -> None:
         self.cfg["always_on_top"] = bool(checked)
